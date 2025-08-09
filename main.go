@@ -2,14 +2,32 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+var tempGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "cpu_temperature_celsius_average",
+	Help: "Average CPU temperature in Celsius",
+})
+
 func main() {
+
+	prometheus.MustRegister(tempGauge)
+
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Println("Prometheus metrics @ :8080/metrics")
+		http.ListenAndServe(":8080", nil)
+	}()
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -49,4 +67,5 @@ func gatherSensorData() {
 
 	timeNow := time.Now().Format(time.RFC850)
 	log.Printf("["+timeNow+"] Average temperature: %.1fC", averageTemp)
+	tempGauge.Set(averageTemp)
 }
