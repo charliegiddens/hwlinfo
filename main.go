@@ -43,7 +43,7 @@ func gatherSensorData() {
 		log.Fatal(err)
 	}
 
-	var runningTotal float64
+	runningTotal := 0.0
 
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
@@ -65,7 +65,7 @@ func gatherSensorData() {
 	}
 	averageTemp := runningTotal / float64(len(paths))
 
-	timeNow := time.Now().Format(time.RFC850)
+	timeNow := time.Now().Format(time.StampMilli)
 	log.Printf("["+timeNow+"] Average temperature: %.1fC", averageTemp)
 	tempGauge.Set(averageTemp)
 }
