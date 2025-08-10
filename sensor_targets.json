@@ -1,0 +1,18 @@
+{
+  "sensors": [
+    {
+      "pattern": "/sys/class/thermal/thermal_zone*/temp",
+      "name": "cpu_temperature_celsius_average",
+      "help": "Average CPU temperature in Celsius", 
+      "is_average": true,
+      "divisor": 1000.0
+    },
+    {
+      "pattern": "/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq",
+      "name": "cpu_frequency_mhz_peak",
+      "help": "Peak CPU clock speed in MHz",
+      "is_average": false,
+      "divisor": 1000.0
+    }
+  ]
+}

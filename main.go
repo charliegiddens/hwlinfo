@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -13,34 +14,51 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var (
-	cpu_tempGauge_avg = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "cpu_temperature_celsius_average",
-		Help: "Average CPU temperature in Celsius",
-	})
-
-	cpu_freqGauge_peak = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "cpu_frequency_mhz_peak",
-		Help: "Peak CPU clock speed in MHz",
-	})
-)
-
 type SensorConfig struct {
-	Pattern   string
-	Gauge     prometheus.Gauge
-	isAverage bool
-	Divisor   float64
+	Pattern   string           `json:"pattern"`
+	Name      string           `json:"name"`
+	Help      string           `json:"help"`
+	IsAverage bool             `json:"is_average"`
+	Divisor   float64          `json:"divisor"`
+	Gauge     prometheus.Gauge `json:"-"` // no serialisation
 }
 
-var sensor_targets = []SensorConfig{
-	{"/sys/class/thermal/thermal_zone*/temp", cpu_tempGauge_avg, true, 1000.0},
-	{"/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq", cpu_freqGauge_peak, false, 1000.0},
+type SensorFile struct {
+	Sensors []SensorConfig `json:"sensors"`
+}
+
+var sensor_targets []SensorConfig
+
+func loadSensorConfig(filename string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	var config SensorFile
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		return err
+	}
+
+	for i := range config.Sensors {
+		config.Sensors[i].Gauge = prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: config.Sensors[i].Name,
+			Help: config.Sensors[i].Help,
+		})
+		prometheus.MustRegister(config.Sensors[i].Gauge)
+	}
+
+	sensor_targets = config.Sensors
+	return nil
 }
 
 func main() {
 
-	prometheus.MustRegister(cpu_tempGauge_avg)
-	prometheus.MustRegister(cpu_freqGauge_peak)
+	err := loadSensorConfig("sensor_targets.json")
+	if err != nil {
+		log.Fatal("Failed to load sensor config:", err)
+	}
 
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
@@ -50,21 +68,18 @@ func main() {
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-
 	for range ticker.C {
 		gatherSensorData()
 	}
-
 }
 
 func gatherSensorData() {
-	for _, sensorTarget := range sensor_targets { // Fix syntax
-		paths, err := filepath.Glob(sensorTarget.Pattern) // Use the pattern!
+	for _, sensorTarget := range sensor_targets {
+		paths, err := filepath.Glob(sensorTarget.Pattern)
 		if err != nil || len(paths) == 0 {
 			log.Printf("No paths found for %s", sensorTarget.Pattern)
-			continue // Don't Fatal, just skip
+			continue
 		}
-
 		runningTotal := 0.0
 		maxValue := 0.0
 		validCount := 0
@@ -82,7 +97,6 @@ func gatherSensorData() {
 				continue
 			}
 			value := float64(valueInt) / sensorTarget.Divisor
-
 			runningTotal += value
 			if value > maxValue {
 				maxValue = value
@@ -91,7 +105,7 @@ func gatherSensorData() {
 		}
 
 		if validCount > 0 {
-			if sensorTarget.isAverage {
+			if sensorTarget.IsAverage {
 				result := runningTotal / float64(validCount)
 				sensorTarget.Gauge.Set(result)
 				log.Printf("Average %s: %.1f", sensorTarget.Pattern, result)
