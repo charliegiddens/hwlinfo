@@ -8,5 +8,5 @@ scrape_configs:
 
   - job_name: 'hwlinfo-sensors'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: ['host.docker.internal:8080']
     scrape_interval: 1s

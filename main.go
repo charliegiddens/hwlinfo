@@ -20,9 +20,8 @@ type SensorConfig struct {
 	Pattern     string               `json:"pattern"`
 	Name        string               `json:"name"`
 	Help        string               `json:"help"`
-	Divisor     float64              `json:"divisor"`
-	OriginRegex string               `json:"origin_regex,omitempty"` // new optional field for regex
-	GaugeVec    *prometheus.GaugeVec `json:"-"`
+	OriginRegex string               `json:"origin_regex,omitempty"`
+	GaugeVec    *prometheus.GaugeVec `json:"-"` // no serialisation
 }
 
 type SensorFile struct {
@@ -97,6 +96,11 @@ func pollSensorContinuously(ctx context.Context, config SensorConfig, goroutineI
 }
 
 func pollSensorOnce(sensorTarget SensorConfig) {
+	if sensorTarget.Pattern == "/proc/meminfo" {
+		pollMeminfo(sensorTarget)
+		return
+	}
+
 	paths, err := filepath.Glob(sensorTarget.Pattern)
 	if err != nil || len(paths) == 0 {
 		log.Printf("No paths found for %s", sensorTarget.Pattern)
@@ -115,12 +119,46 @@ func pollSensorOnce(sensorTarget SensorConfig) {
 			log.Printf("Failed to parse value in %s: %v", path, err)
 			continue
 		}
-		value := float64(valueInt) / sensorTarget.Divisor
+		value := float64(valueInt)
 
 		origin := extractOriginFromPath(path, sensorTarget)
 
 		sensorTarget.GaugeVec.WithLabelValues(origin).Set(value)
 		log.Printf("Set %s{origin=%s} = %.2f", sensorTarget.Name, origin, value)
+	}
+}
+
+func pollMeminfo(sensorTarget SensorConfig) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		log.Printf("Failed to read /proc/meminfo: %v", err)
+		return
+	}
+
+	allowedKeys := map[string]struct{}{
+		"MemAvailable": {},
+		"MemFree":      {},
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		key := strings.TrimSuffix(fields[0], ":")
+		if _, ok := allowedKeys[key]; !ok {
+			continue
+		}
+		valueStr := fields[1]
+		valueInt, err := strconv.ParseFloat(valueStr, 64)
+		if err != nil {
+			continue
+		}
+		value := valueInt
+
+		sensorTarget.GaugeVec.WithLabelValues(key).Set(value)
+		log.Printf("Set %s{origin=%s} = %.2f", sensorTarget.Name, key, value)
 	}
 }
 
@@ -138,7 +176,7 @@ func extractOriginFromPath(path string, config SensorConfig) string {
 		return "unknown"
 	}
 
-	// fallback for backward compatibility
+	// fallback for compatibility
 	if strings.Contains(path, "/cpu") {
 		dir := filepath.Dir(path)
 		parentDir := filepath.Dir(dir)

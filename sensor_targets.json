@@ -4,15 +4,19 @@
       "pattern": "/sys/class/thermal/thermal_zone*/temp",
       "name": "system_temperature_celsius",
       "help": "Sensor temperatures in Celsius", 
-      "divisor": 1000.0,
       "origin_regex": "thermal_zone\\d+"
     },
     {
       "pattern": "/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq",
       "name": "cpu_frequency_mhz",
       "help": "CPU thread clock speed in MHz",
-      "divisor": 1000.0,
       "origin_regex": "cpu\\d+"
+    },
+    {
+      "pattern": "/proc/meminfo",
+      "name": "memory_info_kb",
+      "help": "Memory info metrics from /proc/meminfo in KB",
+      "origin_regex": ""
     }
   ]
 }
