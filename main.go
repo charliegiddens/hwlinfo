@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,12 +17,12 @@ import (
 )
 
 type SensorConfig struct {
-	Pattern   string           `json:"pattern"`
-	Name      string           `json:"name"`
-	Help      string           `json:"help"`
-	IsAverage bool             `json:"is_average"`
-	Divisor   float64          `json:"divisor"`
-	Gauge     prometheus.Gauge `json:"-"` // no serialisation
+	Pattern     string               `json:"pattern"`
+	Name        string               `json:"name"`
+	Help        string               `json:"help"`
+	Divisor     float64              `json:"divisor"`
+	OriginRegex string               `json:"origin_regex,omitempty"` // new optional field for regex
+	GaugeVec    *prometheus.GaugeVec `json:"-"`
 }
 
 type SensorFile struct {
@@ -42,13 +43,12 @@ func loadSensorConfig(filename string) error {
 		return err
 	}
 
-	// prometheus gauge creation
 	for i := range config.Sensors {
-		config.Sensors[i].Gauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		config.Sensors[i].GaugeVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: config.Sensors[i].Name,
 			Help: config.Sensors[i].Help,
-		})
-		prometheus.MustRegister(config.Sensors[i].Gauge)
+		}, []string{"origin"})
+		prometheus.MustRegister(config.Sensors[i].GaugeVec)
 	}
 
 	sensor_targets = config.Sensors
@@ -56,7 +56,6 @@ func loadSensorConfig(filename string) error {
 }
 
 func main() {
-
 	err := loadSensorConfig("sensor_targets.json")
 	if err != nil {
 		log.Fatal("Failed to load sensor config:", err)
@@ -70,16 +69,13 @@ func main() {
 		http.ListenAndServe(":8080", nil)
 	}()
 
-	// context for clean shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start goroutine foreach sensor type
 	for i, sensorTarget := range sensor_targets {
 		go pollSensorContinuously(ctx, sensorTarget, i+1)
 	}
 
-	// Keep main thread waiting forever to stop defer ending main()
 	select {}
 }
 
@@ -107,10 +103,6 @@ func pollSensorOnce(sensorTarget SensorConfig) {
 		return
 	}
 
-	runningTotal := 0.0
-	maxValue := 0.0
-	validCount := 0
-
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -124,21 +116,36 @@ func pollSensorOnce(sensorTarget SensorConfig) {
 			continue
 		}
 		value := float64(valueInt) / sensorTarget.Divisor
-		runningTotal += value
-		if value > maxValue {
-			maxValue = value
+
+		origin := extractOriginFromPath(path, sensorTarget)
+
+		sensorTarget.GaugeVec.WithLabelValues(origin).Set(value)
+		log.Printf("Set %s{origin=%s} = %.2f", sensorTarget.Name, origin, value)
+	}
+}
+
+func extractOriginFromPath(path string, config SensorConfig) string {
+	if config.OriginRegex != "" {
+		re, err := regexp.Compile(config.OriginRegex)
+		if err != nil {
+			log.Printf("Invalid regex %q for sensor %s: %v", config.OriginRegex, config.Name, err)
+			return "unknown"
 		}
-		validCount++
+		matches := re.FindStringSubmatch(path)
+		if len(matches) > 0 {
+			return matches[0] // full match
+		}
+		return "unknown"
 	}
 
-	if validCount > 0 {
-		if sensorTarget.IsAverage {
-			result := runningTotal / float64(validCount)
-			sensorTarget.Gauge.Set(result)
-			log.Printf("Average %s: %.1f", sensorTarget.Pattern, result)
-		} else {
-			sensorTarget.Gauge.Set(maxValue)
-			log.Printf("Peak %s: %.0f", sensorTarget.Pattern, maxValue)
-		}
+	// fallback for backward compatibility
+	if strings.Contains(path, "/cpu") {
+		dir := filepath.Dir(path)
+		parentDir := filepath.Dir(dir)
+		return filepath.Base(parentDir)
+	} else if strings.Contains(path, "/thermal_zone") {
+		dir := filepath.Dir(path)
+		return filepath.Base(dir)
 	}
+	return "unknown"
 }
