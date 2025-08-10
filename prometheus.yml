@@ -6,7 +6,7 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'go-temperature-app'
+  - job_name: 'hwlinfo-sensors'
     static_configs:
       - targets: ['192.168.1.118:8080']
     scrape_interval: 1s
