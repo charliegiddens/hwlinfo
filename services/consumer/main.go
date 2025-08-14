@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,16 +11,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/IBM/sarama"
+	"github.com/joho/godotenv"
 )
 
+type MetricMessage struct {
+	Name      string            `json:"name"`
+	Help      string            `json:"help"`
+	Value     float64           `json:"value"`
+	Labels    map[string]string `json:"labels"`
+	Timestamp time.Time         `json:"timestamp"`
+}
+
 type SensorConfig struct {
-	Pattern     string               `json:"pattern"`
-	Name        string               `json:"name"`
-	Help        string               `json:"help"`
-	OriginRegex string               `json:"origin_regex,omitempty"`
-	GaugeVec    *prometheus.GaugeVec `json:"-"` // no serialisation
+	Pattern     string `json:"pattern"`
+	Name        string `json:"name"`
+	Help        string `json:"help"`
+	OriginRegex string `json:"origin_regex,omitempty"`
 }
 
 type SensorFile struct {
@@ -29,6 +35,7 @@ type SensorFile struct {
 }
 
 var sensor_targets []SensorConfig
+var kafkaProducer sarama.AsyncProducer
 
 func loadSensorConfig(filename string) error {
 	data, err := os.ReadFile(filename)
@@ -42,31 +49,79 @@ func loadSensorConfig(filename string) error {
 		return err
 	}
 
-	for i := range config.Sensors {
-		config.Sensors[i].GaugeVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: config.Sensors[i].Name,
-			Help: config.Sensors[i].Help,
-		}, []string{"origin"})
-		prometheus.MustRegister(config.Sensors[i].GaugeVec)
-	}
-
 	sensor_targets = config.Sensors
 	return nil
 }
 
+func initKafka() error {
+	config := sarama.NewConfig()
+	config.Producer.Return.Successes = false
+	config.Producer.Return.Errors = true
+	config.Producer.RequiredAcks = sarama.WaitForLocal
+	config.Producer.Retry.Max = 3
+
+	// Get Kafka broker from environment or use default
+	brokers := strings.Split(os.Getenv("KAFKA_BROKERS"), ",")
+
+	producer, err := sarama.NewAsyncProducer(brokers, config)
+	if err != nil {
+		return err
+	}
+
+	kafkaProducer = producer
+
+	// Handle errors in a separate goroutine
+	go func() {
+		for err := range producer.Errors() {
+			log.Printf("Failed to produce message: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+func sendMetricToKafka(metric MetricMessage) {
+	topic := os.Getenv("KAFKA_TOPIC")
+
+	jsonData, err := json.Marshal(metric)
+	if err != nil {
+		log.Printf("Failed to marshal metric: %v", err)
+		return
+	}
+
+	message := &sarama.ProducerMessage{
+		Topic: topic,
+		Value: sarama.StringEncoder(jsonData),
+		Key:   sarama.StringEncoder(metric.Name + "_" + metric.Labels["origin"]),
+	}
+
+	kafkaProducer.Input() <- message
+}
+
 func main() {
-	err := loadSensorConfig("sensor_targets.json")
+	binaryPath, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	binaryDir := filepath.Dir(binaryPath)
+	envPath := filepath.Join(binaryDir, "..", ".env")
+
+	if err := godotenv.Load(envPath); err != nil {
+		log.Fatal("Error loading .env file:", err)
+	}
+
+	err = loadSensorConfig("data/sensor_targets.json")
 	if err != nil {
 		log.Fatal("Failed to load sensor config:", err)
 	}
 
-	log.Printf("Starting monitoring with %d sensor types", len(sensor_targets))
+	err = initKafka()
+	if err != nil {
+		log.Fatal("Failed to initialize Kafka:", err)
+	}
+	defer kafkaProducer.Close()
 
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		log.Println("Prometheus metrics @ :8080/metrics")
-		http.ListenAndServe(":8080", nil)
-	}()
+	log.Printf("Starting monitoring with %d sensor types", len(sensor_targets))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -123,8 +178,16 @@ func pollSensorOnce(sensorTarget SensorConfig) {
 
 		origin := extractOriginFromPath(path, sensorTarget)
 
-		sensorTarget.GaugeVec.WithLabelValues(origin).Set(value)
-		log.Printf("Set %s{origin=%s} = %.2f", sensorTarget.Name, origin, value)
+		metric := MetricMessage{
+			Name:      sensorTarget.Name,
+			Help:      sensorTarget.Help,
+			Value:     value,
+			Labels:    map[string]string{"origin": origin},
+			Timestamp: time.Now(),
+		}
+
+		sendMetricToKafka(metric)
+		log.Printf("Sent %s{origin=%s} = %.2f to Kafka", sensorTarget.Name, origin, value)
 	}
 }
 
@@ -157,8 +220,16 @@ func pollMeminfo(sensorTarget SensorConfig) {
 		}
 		value := valueInt
 
-		sensorTarget.GaugeVec.WithLabelValues(key).Set(value)
-		log.Printf("Set %s{origin=%s} = %.2f", sensorTarget.Name, key, value)
+		metric := MetricMessage{
+			Name:      sensorTarget.Name,
+			Help:      sensorTarget.Help,
+			Value:     value,
+			Labels:    map[string]string{"origin": key},
+			Timestamp: time.Now(),
+		}
+
+		sendMetricToKafka(metric)
+		log.Printf("Sent %s{origin=%s} = %.2f to Kafka", sensorTarget.Name, key, value)
 	}
 }
 
